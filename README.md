@@ -60,15 +60,15 @@ UDP `9027` carries installer data over LDN. TCP `9026` receives later JS payload
 
 ### Send JS payloads
 
-With persistence installed, the console listens for later payloads on its Wi-Fi address; send a JS file to the IP shown on screen:
+On a console that already has the persistent trigger save, the loader starts itself when the game loads (`Load Game`). Ship a JS file straight to it over the local-wireless link — no Wi-Fi/LAN network is involved:
 
 ```sh
-node send_payload.js <console-ip> payloads/helloworld.js
+npm start -- --loader payloads/helloworld.js
 ```
 
-The JS file is optional (default: `payloads/helloworld.js`), as is a third port argument (default: `9026`).
+The loader listens on TCP port `9026` and replies `Executed successfully` after each payload; it keeps listening, so repeat the command for more payloads.
 
-Without any LAN or Wi-Fi, deliver a payload in one LDN session instead: its contents run right after the exploit, in the same chat delivery:
+Without the persistent save, fold the payload into the initial injection instead: its contents run right after the exploit, in the same chat delivery:
 
 ```sh
 npm start -- --send payloads/helloworld.js
@@ -76,11 +76,19 @@ npm start -- --send payloads/helloworld.js
 
 The Wi-Fi loader is not started in this mode; run the command again to send another payload.
 
+Over a plain network, send a JS file to the console IP shown by the loader:
+
+```sh
+node send_payload.js <console-ip> payloads/helloworld.js
+```
+
+The JS file is optional (default: `payloads/helloworld.js`), as is a third port argument (default: `9026`).
+
 ## How it works
 
 [run.js](run.js) handles the sequence:
 
-1. Add the small UDP installer receiver to [payloads/core.js](payloads/core.js), unless `--no-persist` or `--send` was passed, then compress it into chat messages. With `--send`, the chosen file is appended to the exploit instead so it runs directly over LDN chat.
+1. Add the small UDP installer receiver to [payloads/core.js](payloads/core.js), unless `--no-persist`, `--send` or `--loader` was passed, then compress it into chat messages. With `--send`, the chosen file is appended to the exploit instead so it runs directly over LDN chat. With `--loader`, no exploit is injected: the lobby is joined, then the file is shipped to the running loader over LDN TCP.
 2. Temporarily release Wi-Fi for LDN, scan nearby LDN networks, connect to the selected host, join its Civilization VII lobby and send the messages.
 3. Send the save template and installer script over UDP `9027`. The console requests missing chunks and confirms when it has received them all.
 4. Close LDN and restore networking. The console installs from memory and reports `INSTALL DONE` when it finishes.

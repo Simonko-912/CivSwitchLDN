@@ -10,6 +10,7 @@
  *   --host <mac>        LDN host MAC when more than one network is found
  *   --switch-ip <ip>    Console's Wi-Fi IP for the --no-persist loader scan
  *   --send <file>       Deliver this JS file over LDN chat instead of the boot payload
+ *   --loader <file>     Ship this JS file to the running loader over LDN TCP
  *   --chat-delay <ms>   Delay between chat messages in ms (default: 10)
  *   --handshake-scale <n> Multiply handshake delays by n (default: 1.0)
  *   --no-persist        Skip automatic persistent installer
@@ -33,16 +34,18 @@ const INSTALLER_PYTHON = path.join(__dirname, "ldn", ".venv", "bin", "python");
 async function main(args = process.argv.slice(2)) {
   const opts = parseArgs(args);
   if (opts.help) {
-    console.log("Usage: npm start -- [--keys path] [--phy radio] [--ifname name] [--host ldn-host-mac] [--switch-ip console-ip] [--send file.js] [--chat-delay ms] [--handshake-scale n] [--no-persist] [--verbose]");
+    console.log("Usage: npm start -- [--keys path] [--phy radio] [--ifname name] [--host ldn-host-mac] [--switch-ip console-ip] [--send file.js] [--loader file.js] [--chat-delay ms] [--handshake-scale n] [--no-persist] [--verbose]");
     return;
   }
 
-  const prompt = opts.noPersist && !opts.send
+  const prompt = opts.noPersist && !(opts.send || opts.loader)
     ? readline.createInterface({ input: process.stdin, output: process.stdout })
     : null;
   try {
     await injectViaLDN(opts);
-    if (opts.send) {
+    if (opts.loader) {
+      console.log("Loader reply shown above; the loader keeps listening.");
+    } else if (opts.send) {
       console.log(`Payload delivered over LDN: ${opts.send}`);
     } else if (opts.noPersist) {
       opts.switchIP = await waitForLoader(opts, prompt);
@@ -65,24 +68,32 @@ async function injectViaLDN(opts) {
   opts.phy = phy;
   // --send delivers one extra JS file in the same LDN session: its contents
   // run right after the exploit instead of starting the Wi-Fi loader, so no
-  // LAN is involved at any step. Plain runs keep the upstream boot flow.
-  const persistent = !opts.noPersist && !opts.send;
+  // LAN is involved at any step. --loader skips the chat injection entirely
+  // and ships the file to the loader the persistent save already started.
+  // Plain runs keep the upstream boot flow.
+  const persistent = !opts.noPersist && !opts.send && !opts.loader;
   console.log("Preparing the payload...");
   const tempDir = persistent ? fs.mkdtempSync(path.join(os.tmpdir(), "civswitch-ldn-")) : null;
   try {
-    let source = fs.readFileSync(PAYLOAD_PATH, "utf8");
-    if (opts.send) {
-      source = withInlinePayload(source, fs.readFileSync(opts.send, "utf8"));
-    } else if (persistent) {
-      source = addUdpInstallerReceiver(source);
-      await runCommand(INSTALLER_PYTHON, [
-        path.join(__dirname, "installer", "install.py"),
-        "--build-ldn-assets", tempDir, PAYLOAD_PATH,
-      ]);
-    }
+    let lines = [];
+    if (opts.loader) {
+      const size = fs.statSync(opts.loader).size;
+      console.log(`Payload ready (${size} bytes for the loader, shipped over LDN).`);
+    } else {
+      let source = fs.readFileSync(PAYLOAD_PATH, "utf8");
+      if (opts.send) {
+        source = withInlinePayload(source, fs.readFileSync(opts.send, "utf8"));
+      } else if (persistent) {
+        source = addUdpInstallerReceiver(source);
+        await runCommand(INSTALLER_PYTHON, [
+          path.join(__dirname, "installer", "install.py"),
+          "--build-ldn-assets", tempDir, PAYLOAD_PATH,
+        ]);
+      }
 
-    const lines = await compress(source);
-    console.log(`Payload ready (${lines.length} chat messages${persistent ? ", UDP installer receiver" : ", chat only"}).`);
+      lines = await compress(source);
+      console.log(`Payload ready (${lines.length} chat messages${persistent ? ", UDP installer receiver" : ", chat only"}).`);
+    }
     const args = [
       path.join(__dirname, "bash", "network.sh"), "--phy", phy,
       PYTHON, path.join(__dirname, "ldn", "main.py"),
@@ -91,6 +102,7 @@ async function injectViaLDN(opts) {
     if (opts.host) args.push("--host", opts.host);
     if (opts.chatDelay != null) args.push("--chat-delay", String(opts.chatDelay));
     if (opts.handshakeScale != null) args.push("--handshake-scale", String(opts.handshakeScale));
+    if (opts.loader) args.push("--payload", opts.loader);
     if (persistent) {
       args.push(
         "--installer-template", path.join(tempDir, "template.b64"),
@@ -160,7 +172,7 @@ function parseArgs(args) {
   const opts = { keys: path.join(__dirname, "prod.keys"), ifname: "civ7-ldn" };
   const values = {
     "--keys": "keys", "--phy": "phy", "--ifname": "ifname",
-    "--host": "host", "--switch-ip": "switchIP", "--send": "send", "--chat-delay": "chatDelay", "--handshake-scale": "handshakeScale",
+    "--host": "host", "--switch-ip": "switchIP", "--send": "send", "--loader": "loader", "--chat-delay": "chatDelay", "--handshake-scale": "handshakeScale",
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -180,7 +192,9 @@ function parseArgs(args) {
     }
   }
   if (opts.switchIP && !net.isIPv4(opts.switchIP)) throw new Error("Invalid --switch-ip address.");
-  if (opts.send && !path.isAbsolute(opts.send)) opts.send = path.resolve(opts.send);
+  for (const flag of ["send", "loader"]) {
+    if (opts[flag] && !path.isAbsolute(opts[flag])) opts[flag] = path.resolve(opts[flag]);
+  }
   return opts;
 }
 

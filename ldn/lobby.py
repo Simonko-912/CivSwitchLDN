@@ -18,6 +18,8 @@ DEFAULT_CHAT_DELAY_MS = 10
 DEFAULT_HANDSHAKE_SCALE = 1.0
 MIN_DURATION = 30
 INSTALLER_PORT = 9027
+LOADER_PORT = 9026
+LOADER_REPLY_TIMEOUT = 20
 INSTALLER_CHUNK_SIZE = 1100
 INSTALLER_CHUNK_DELAY = 0.005
 INSTALLER_REPAIR_ROUNDS = 60
@@ -40,6 +42,11 @@ async def run(args, network):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, args.ifname.encode() + b"\0")
         await sock.bind((local_ip, protocol.PORT))
         result = await session.run(sock)
+
+    if args.payload is not None:
+        if result != 0:
+            return result
+        return await send_payload_to_loader(host_ip, args.payload)
 
     if result != 0 or args.installer_template is None:
         return result
@@ -151,6 +158,59 @@ async def send_installer_over_ldn(ifname, local_ip, host_ip, template_b64, apply
         if install_status == "error":
             raise RuntimeError("The console reported that the persistence installer failed.")
         raise RuntimeError("Timed out receiving installer completion from the console.")
+
+
+async def send_payload_to_loader(host_ip, payload_path):
+    """Ship one JS file to the running Remote JS Loader over the LDN route.
+
+    The persistent trigger save already started the loader on TCP port 9026,
+    bound to all interfaces so the local-wireless address reaches it. Send
+    the file, half-close so the loader runs it, and echo its reply. No
+    Wi-Fi/LAN is involved; the loader keeps listening afterwards.
+    """
+    payload = payload_path.read_bytes()
+    print(
+        f"Sending payload to the loader at {host_ip}:{LOADER_PORT} "
+        f"({len(payload)} bytes over LDN)...",
+        flush=True,
+    )
+
+    with trio.socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        deadline = time.monotonic() + LOADER_REPLY_TIMEOUT
+        while True:
+            with trio.move_on_after(2):
+                try:
+                    await sock.connect((host_ip, LOADER_PORT))
+                    break
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Loader not found on the lobby IP. Is the game open with the trigger save?")
+            await trio.sleep(0.3)
+
+        sock.sendall(payload)
+        sock.shutdown(socket.SHUT_WR)
+
+        reply = ""
+        while time.monotonic() < deadline:
+            chunk = None
+            with trio.move_on_after(2):
+                chunk = await sock.recv(4096)
+            if chunk is None:
+                continue
+            if not chunk:
+                break
+            reply += chunk.decode("utf-8", "replace")
+            if "Executed successfully" in reply:
+                break
+
+    if reply.strip():
+        print(reply.strip(), flush=True)
+    if "Executed successfully" in reply:
+        print("Payload executed; the loader keeps listening.", flush=True)
+        return 0
+    raise RuntimeError("The loader did not confirm the payload.")
 
 
 class LobbySession:

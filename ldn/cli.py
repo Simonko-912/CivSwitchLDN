@@ -14,6 +14,11 @@ def build_parser():
     cli.add_argument("--installer-template", type=Path, help="Base64 save template for the UDP LDN installer")
     cli.add_argument("--installer-apply", type=Path, help="Base64 installer script for the UDP LDN installer")
     cli.add_argument(
+        "--payload",
+        type=Path,
+        help="JS file for the running Remote JS Loader, shipped over LDN TCP",
+    )
+    cli.add_argument(
         "--host",
         type=_mac,
         help="host MAC; auto-selected when only one network is found",
