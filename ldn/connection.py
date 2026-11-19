@@ -12,10 +12,13 @@ import platform
 import re
 import sys
 
+import trio
+
 CHANNELS = (1, 6, 11, 36, 40, 44, 48)
 PROTOCOLS = (1, 3)
-MAX_SCAN_ATTEMPTS = 3
+MAX_SCAN_ATTEMPTS = 12
 SCAN_DWELL = 0.3
+SCAN_RETRY_PAUSE = 1.0
 PLAYER_NAME = "Civ7-PC"
 KEY_NAMES = ("aes_kek_generation_source", "aes_key_generation_source")
 MASTER_KEYS = {1: "master_key_00", 3: "master_key_12"}
@@ -29,11 +32,14 @@ async def scan(keys, phy, ifname, host=None):
     found = {}
 
     print("Searching for nearby LDN networks...", flush=True)
-    # One full channel pass usually suffices. Retry only if no matching host
-    # advertised during that pass; keep all results for host selection.
+    # One full channel pass usually suffices. A persistent-save loader hosts
+    # its lobby a few seconds after the save loads, so keep scanning with a
+    # short pause between passes before giving up; keep all results for host
+    # selection.
     for i in range(MAX_SCAN_ATTEMPTS):
         if i:
             print(f"LDN network not found yet; retrying scan ({i + 1}/{MAX_SCAN_ATTEMPTS})...", flush=True)
+            await trio.sleep(SCAN_RETRY_PAUSE)
         logger.debug("Scanning channels %s, protocols %s", CHANNELS, PROTOCOLS)
         networks = await ldn.scan(
             keys,
