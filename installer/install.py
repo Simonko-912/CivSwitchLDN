@@ -422,7 +422,7 @@ def load_template():
 
 def build_apply_js(payload_path, tpl_b64, tmp):
     core = io.open(payload_path, encoding="utf-8").read().replace("\r\n", "\n")
-    wrapped = ("(async function() {\ntry{\n" + core +
+    wrapped = ("(async function() {\ntry{\nwindow.__civ_persist=1;\n" + core +
                "\n} catch (e) {\nawait log('EXCEPTION: ' + e.message);\nawait log(e.stack);\n}\n})();")
     wrapped_path = os.path.join(tmp, "wrapped.js")
     io.open(wrapped_path, "w", encoding="utf-8", newline="\n").write(wrapped)
