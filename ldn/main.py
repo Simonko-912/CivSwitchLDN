@@ -54,6 +54,12 @@ def main(argv=None):
         print("\nInterrupted.")
         return 130
     except Exception as e:
+        # Unwrap single-member exception groups (trio nursery) so the
+        # actual error text reaches the terminal instead of the group
+        # summary line.
+        subs = getattr(e, "exceptions", None)
+        if subs:
+            e = subs[0]
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

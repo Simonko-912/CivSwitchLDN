@@ -42,7 +42,7 @@ async def run(args, network):
         # 9026 and answers anyone on the LDN link. The game-level lobby
         # handshake only matters for chat injection, so ship the file
         # straight over the route instead of waiting on a welcome packet.
-        return await send_payload_to_loader(host_ip, args.payload)
+        return send_payload_to_loader(args.ifname, host_ip, args.payload)
 
     # Bind game traffic to LDN so the normal network cannot receive it.
     with trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -53,7 +53,7 @@ async def run(args, network):
     if args.payload is not None:
         if result != 0:
             return result
-        return await send_payload_to_loader(host_ip, args.payload)
+        return send_payload_to_loader(args.ifname, host_ip, args.payload)
 
     if result != 0 or args.installer_template is None:
         return result
@@ -167,13 +167,15 @@ async def send_installer_over_ldn(ifname, local_ip, host_ip, template_b64, apply
         raise RuntimeError("Timed out receiving installer completion from the console.")
 
 
-async def send_payload_to_loader(host_ip, payload_path):
+def send_payload_to_loader(ifname, host_ip, payload_path):
     """Ship one JS file to the running Remote JS Loader over the LDN route.
 
     The persistent trigger save already started the loader on TCP port 9026,
-    bound to all interfaces so the local-wireless address reaches it. Send
-    the file, half-close so the loader runs it, and echo its reply. No
-    Wi-Fi/LAN is involved; the loader keeps listening afterwards.
+    bound to all interfaces so the local-wireless address reaches it. Use a
+    plain blocking socket: the trio async half-close/reply dance buried the
+    real error inside a nursery exception group. Bind to the LDN interface,
+    send the file, half-close so the loader runs it, echo its reply. The
+    loader keeps listening afterwards.
     """
     payload = payload_path.read_bytes()
     print(
@@ -182,35 +184,39 @@ async def send_payload_to_loader(host_ip, payload_path):
         flush=True,
     )
 
-    with trio.socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, ifname.encode() + b"\0")
+        sock.settimeout(2.0)
         deadline = time.monotonic() + LOADER_REPLY_TIMEOUT
         while True:
-            with trio.move_on_after(2):
-                try:
-                    await sock.connect((host_ip, LOADER_PORT))
-                    break
-                except OSError:
-                    pass
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Loader not found on the lobby IP. Is the game open with the trigger save?")
-            await trio.sleep(0.3)
+            try:
+                sock.connect((host_ip, LOADER_PORT))
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Loader not found on the lobby IP. Is the game open with the trigger save?")
+                time.sleep(0.3)
 
         sock.sendall(payload)
         sock.shutdown(socket.SHUT_WR)
 
         reply = ""
         while time.monotonic() < deadline:
-            chunk = None
-            with trio.move_on_after(2):
-                chunk = await sock.recv(4096)
-            if chunk is None:
+            try:
+                chunk = sock.recv(4096)
+            except TimeoutError:
                 continue
+            except OSError:
+                break
             if not chunk:
                 break
             reply += chunk.decode("utf-8", "replace")
             if "Executed successfully" in reply:
                 break
+    finally:
+        sock.close()
 
     if reply.strip():
         print(reply.strip(), flush=True)
