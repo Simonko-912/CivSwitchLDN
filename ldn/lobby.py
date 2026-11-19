@@ -37,6 +37,13 @@ async def run(args, network):
 
     await warmup_arp(args.ifname, local_ip, host_ip)
 
+    if args.payload is not None:
+        # Loader mode: the persistent-save loader already listens on TCP
+        # 9026 and answers anyone on the LDN link. The game-level lobby
+        # handshake only matters for chat injection, so ship the file
+        # straight over the route instead of waiting on a welcome packet.
+        return await send_payload_to_loader(host_ip, args.payload)
+
     # Bind game traffic to LDN so the normal network cannot receive it.
     with trio.socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, args.ifname.encode() + b"\0")
