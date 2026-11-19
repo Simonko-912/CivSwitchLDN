@@ -1265,39 +1265,109 @@
             return a + "." + b + "." + c + "." + d;
         }
 
-        async function remote_js_loader() {
-            try { Network.resetNetworkCommunication(); } catch (e) {}
+        function try_host_ldn() {
+            // Persistent-save boot with no Wi-Fi: open a local-wireless
+            // (LDN) lobby so the other console has a network to join and
+            // can deliver payload.js over it. Verified against the game's
+            // own shipped scripts (modules/base-standard/ui/automation/
+            // automation-base-play-game.js and mp-browser-new.js): the
+            // hosting entry point is Network.hostGame(serverType) with the
+            // ServerType enum, and Network.resetNetworkCommunication()
+            // exists as used here. Local wireless = SERVER_TYPE_WIRELESS;
+            // fall back to SERVER_TYPE_NONE then bare hostGame.
+            try {
+                if (typeof Network !== "undefined" && Network &&
+                    typeof Network.hostGame === "function") {
+                    let st = 0;
+                    try {
+                        if (typeof ServerType !== "undefined" && ServerType &&
+                            ServerType.SERVER_TYPE_WIRELESS !== undefined)
+                            st = ServerType.SERVER_TYPE_WIRELESS;
+                    } catch (e) {}
+                    Network.hostGame(st);
+                    return "Network.hostGame(WIRELESS)";
+                }
+            } catch (e) {}
+            return null;
+        }
 
+        async function remote_js_loader() {
+            // Persistent-save path only: when no Wi-Fi/LAN IP shows up, host
+            // a local-wireless lobby once so the homebrew console can find
+            // this one without anyone touching the game menus. Chat-injected
+            // runs (window.__civ_persist unset) keep the v1.3.4 behavior.
+            const persist = (window.__civ_persist === 1);
+            let ldnHosted = !persist;
+            // Do NOT reset network communication up front. On a pure local
+            // wireless (LDN) lobby the reset drops the lobby connection the
+            // chat payload just arrived through, so the dialing console
+            // times out against a stale address while this loader idles at
+            // "Awaiting payload". The periodic reset in the retry paths
+            // below still revives genuinely dead Wi-Fi stacks.
             let setupFails = 0;
+            let waitTicks = 0;
+            let announced = false;
 
             while (true) {
                 let current_ip = get_current_ip();
-                let announced = false;
-                while (current_ip === null) {
-                    if (!announced) {
-                        await log("Waiting for Wi-Fi network...");
-                        announced = true;
-                    }
-                    await sleep(500);
-                    current_ip = get_current_ip();
+                if (!ldnHosted && current_ip === null) {
+                    await log("no wifi/lan - opening local wireless lobby");
+                    const api = try_host_ldn();
+                    await log(api ? "lobby hosted via " + api
+                                  : "no lobby api found, listening anyway");
+                    ldnHosted = true;
+                    // Give the interface a moment to come up, then re-probe
+                    // so the bind rides the fresh LDN route.
+                    await sleep(1500);
+                    continue;
                 }
-                if (announced) await log("Wi-Fi network restored at " + current_ip);
-
-                let sock_fd;
+                let sock_fd = null;
+                let bind_error = null;
                 try {
                     sock_fd = create_socket();
-                    setupFails = 0;
                 } catch (err) {
-                    setupFails++;
-                    if (setupFails % 3 === 0) {
+                    bind_error = err;
+                }
+
+                if (sock_fd === null && current_ip === null) {
+                    // LDN-only mode: no Wi-Fi IP is available. Wait for a
+                    // usable network before retrying, exactly like before.
+                    // Log the bind error once too, so a hardware stall is
+                    // diagnosable (socket/setsockopt/bind/listen step).
+                    if (!announced) {
+                        await log("network down - waiting for network..");
+                        if (bind_error) {
+                            await log("listener setup failed: " + bind_error.message);
+                        }
+                        announced = true;
+                    }
+                    // Wi-Fi consoles: revive a genuinely down stack after a
+                    // few plain waits, like before, but not before the very
+                    // first bind attempt had a fair chance.
+                    waitTicks++;
+                    if (waitTicks % 3 === 0) {
                         try { Network.resetNetworkCommunication(); } catch (e) {}
                     }
-                    await log("listener setup failed: " + err.message);
                     await sleep(2000);
                     continue;
                 }
 
-                const network_str = current_ip + ":" + PORT;
+                if (sock_fd === null) {
+                    setupFails++;
+                    if (setupFails % 3 === 0) {
+                        try { Network.resetNetworkCommunication(); } catch (e) {}
+                    }
+                    await log("listener setup failed: " + bind_error.message);
+                    await sleep(2000);
+                    continue;
+                }
+
+                setupFails = 0;
+                if (current_ip === null) {
+                    await log("no network IP - listening on all interfaces (LDN reachable)");
+                }
+
+                const network_str = (current_ip === null ? "0.0.0.0" : current_ip) + ":" + PORT;
 
                 let acceptFails = 0;
                 let badConns = 0;
@@ -1310,10 +1380,24 @@
 
                         if (client_fd === -1n) {
                             acceptFails++;
-                            if (acceptFails >= 2) break;
+                            if (acceptFails >= 6) break;
                             continue;
                         }
                         acceptFails = 0;
+
+                        // Diagnostic: log the source IP of every connection.
+                        // If Switch 1 is dialing its OWN IP (swapped lobby
+                        // roles) this shows S1's address; if S1 is dialing
+                        // the host IP it shows S2's own address.
+                        {
+                            // sin_addr is at offsets 4..7 (network byte order),
+                            // same layout get_current_ip() reads.
+                            const sa = Number(read8(sockaddr_in + 4n));
+                            const sb = Number(read8(sockaddr_in + 5n));
+                            const sc = Number(read8(sockaddr_in + 6n));
+                            const sd = Number(read8(sockaddr_in + 7n));
+                            await log("connection from " + sa + "." + sb + "." + sc + "." + sd);
+                        }
 
                         let total_read = 0;
                         let read_error = false;
@@ -1342,7 +1426,10 @@
                             await log(read_error ? "connection dropped" : "No valid data received");
                             close(client_fd);
                             badConns++;
-                            if (badConns >= 3) break;
+                            // Tolerate Switch 1's repeated 1-byte probe
+                            // connects (each reads 0 bytes -> "No valid
+                            // data received") without dropping the listener.
+                            if (badConns >= 8) break;
                             continue;
                         }
                         badConns = 0;
